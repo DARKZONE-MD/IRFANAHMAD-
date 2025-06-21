@@ -37,6 +37,9 @@ router.get('/', async (req, res) => {
     return res.status(400).send({ code: 'Invalid or missing number' });
   }
 
+  // 💥 Always delete session to allow new registration
+  removeFile('./session');
+
   try {
     const { state, saveCreds } = await useMultiFileAuthState('./session');
 
@@ -50,45 +53,32 @@ router.get('/', async (req, res) => {
       printQRInTerminal: false,
     });
 
-    if (!socket.authState.creds.registered) {
-      await delay(1000);
-      const code = await socket.requestPairingCode(number);
-      res.send({ code });
+    await delay(1000);
+    const code = await socket.requestPairingCode(number);
+    res.send({ code });
 
-      // Attach listeners only after sending response
-      socket.ev.on('creds.update', saveCreds);
+    // Listen for connection and save
+    socket.ev.on('creds.update', saveCreds);
 
-      socket.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
-        if (connection === 'open') {
-          try {
-            await delay(10000); // allow creds to finalize
+    socket.ev.on('connection.update', async ({ connection }) => {
+      if (connection === 'open') {
+        try {
+          await delay(10000);
+          const user_jid = jidNormalizedUser(socket.user.id);
+          const stream = fs.createReadStream('./session/creds.json');
+          const mega_url = await upload(stream, `${randomMegaId()}.json`);
+          const sessionId = mega_url.replace('https://mega.nz/file/', '');
 
-            const authPath = './session/';
-            const user_jid = jidNormalizedUser(socket.user.id);
-            const stream = fs.createReadStream(`${authPath}creds.json`);
-
-            const mega_url = await upload(stream, `${randomMegaId()}.json`);
-            const sessionId = mega_url.replace('https://mega.nz/file/', '');
-
-            await socket.sendMessage(user_jid, { text: sessionId });
-
-            await delay(100);
-            removeFile(authPath);
-          } catch (err) {
-            console.error('Message sending/upload failed:', err.message);
-            exec('pm2 restart prabath');
-          }
-        } else if (
-          connection === 'close' &&
-          lastDisconnect?.error?.output?.statusCode !== 401
-        ) {
-          console.log('Reconnecting...');
+          await socket.sendMessage(user_jid, { text: sessionId });
+          await delay(100);
+          removeFile('./session');
+        } catch (err) {
+          console.error('Upload or send failed:', err);
           exec('pm2 restart prabath');
         }
-      });
-    } else {
-      res.send({ code: 'Already registered' });
-    }
+      }
+    });
+
   } catch (error) {
     console.error('Fatal error:', error.message);
     removeFile('./session');
@@ -98,9 +88,8 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Safety fallback
-process.on('uncaughtException', function (err) {
-  console.error('Caught uncaughtException:', err);
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
   exec('pm2 restart prabath');
 });
 
